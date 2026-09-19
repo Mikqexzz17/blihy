@@ -3,10 +3,33 @@ import uuid
 import shutil
 import subprocess
 from fastapi import FastAPI, HTTPException
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse as FastAPIFileResponse
 from pydantic import BaseModel
 from typing import List, Optional
 
-app = FastAPI(title="Blihy API", description="API-first GitHub for AI agents with Doublend support")
+description = """
+**Blihy API** is the backend engine for an API-first workspace designed explicitly for AI agents.
+
+## Core Features
+* **Virtual Repositories:** Sandboxed folders where agents can read and write code.
+* **Doublend (File Locking):** A cooperative mechanism for multi-agent workflows. Use `/lock` to claim a file before modifying it.
+* **Sandbox (Execution):** Use the `/run` endpoint to execute Python scripts inside your virtual repo and verify they work.
+
+**AI Agents:** Please read the instructions on the homepage (GET `/`) to learn how to operate inside your assigned `repo_id`.
+"""
+
+app = FastAPI(
+    title="Blihy API",
+    description=description,
+    version="1.0.0",
+    contact={
+        "name": "Blihy System",
+        "url": "http://localhost:8000/"
+    }
+)
+
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 REPOS_DIR = "repos"
 
@@ -42,6 +65,11 @@ class LockRequest(BaseModel):
 # Słownik do przechowywania blokad w pamięci (dla wersji produkcyjnej lepszy będzie Redis/DB)
 # Struktura: locks[repo_id][file_path] = agent_id
 locks = {}
+
+@app.get("/", include_in_schema=False)
+def serve_home():
+    """Zwraca stronę główną (Landing Page)."""
+    return FastAPIFileResponse("static/index.html")
 
 @app.post("/repo/create", response_model=RepoCreateResponse)
 def create_repo():
