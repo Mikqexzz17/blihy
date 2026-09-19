@@ -37,7 +37,7 @@
 
         <!-- Hero Section -->
         <div class="bg-white">
-            <div class="max-w-7xl mx-auto py-16 px-4 sm:py-24 sm:px-6 lg:px-8 text-center">
+            <div class="max-w-7xl mx-auto py-16 px-4 sm:py-24 sm:px-6 lg:px-8 text-center relative">
                 <h1 class="text-4xl font-extrabold tracking-tight text-gray-900 sm:text-5xl md:text-6xl">
                     <span class="block">Oto przyszłość kodowania.</span>
                     <span class="block gradient-text">GitHub dla agentów AI.</span>
@@ -53,6 +53,19 @@
                     </div>
                 </div>
                 <div id="repo-result" class="mt-4 text-sm text-gray-700 hidden p-4 bg-green-50 rounded-md border border-green-200 inline-block"></div>
+                <div id="download-section" class="mt-4 hidden">
+                    <button id="download-btn" onclick="downloadRepo()" class="inline-flex items-center justify-center px-4 py-2 border border-gray-300 shadow-sm text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50">
+                        <svg class="-ml-1 mr-2 h-5 w-5 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
+                        Pobierz Repozytorium (ZIP)
+                    </button>
+                </div>
+                <!-- Console -->
+                <div id="console-section" class="mt-8 hidden mx-auto max-w-3xl text-left">
+                    <h3 class="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-2">Konsola Aktywności AI</h3>
+                    <div id="console-output" class="bg-gray-900 rounded-lg p-4 h-48 overflow-y-auto font-mono text-sm text-green-400 shadow-inner">
+                        <div>Oczekuję na aktywność agentów...</div>
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -109,21 +122,69 @@
     </div>
 
     <script>
+        let currentRepoId = null;
+        let ws = null;
+
         async function createRepo() {
             try {
                 const response = await fetch('/repo/create', { method: 'POST' });
                 const data = await response.json();
                 const resultDiv = document.getElementById('repo-result');
+                const downloadSection = document.getElementById('download-section');
                 resultDiv.classList.remove('hidden');
 
                 if(response.ok) {
+                    currentRepoId = data.repo_id;
                     resultDiv.innerHTML = `<strong>Sukces!</strong> Twój token repozytorium to:<br><code class="text-lg bg-gray-100 px-2 py-1 rounded block mt-2 text-gray-900">${data.repo_id}</code><br><span class="text-xs text-gray-500 mt-2 block">Skopiuj ten token i przekaż go swojemu asystentowi AI.</span>`;
+                    downloadSection.classList.remove('hidden');
+                    connectWebSocket();
                 } else {
                     resultDiv.innerHTML = `<span class="text-red-500">Błąd: ${data.detail}</span>`;
                 }
             } catch (error) {
                 alert('Błąd podczas łączenia z API.');
             }
+        }
+
+        function downloadRepo() {
+            if(!currentRepoId) return;
+            window.open(`/repo/${currentRepoId}/download`, '_blank');
+        }
+
+        function connectWebSocket() {
+            if (ws) ws.close();
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${window.location.host}/repo/${currentRepoId}/ws`;
+
+            ws = new WebSocket(wsUrl);
+            const consoleSection = document.getElementById('console-section');
+            const consoleOutput = document.getElementById('console-output');
+
+            consoleSection.classList.remove('hidden');
+
+            ws.onmessage = function(event) {
+                const data = JSON.parse(event.data);
+                const time = new Date().toLocaleTimeString();
+
+                let colorClass = "text-green-400";
+                if(data.type === 'error' || data.status === 'error') colorClass = "text-red-400";
+                if(data.type === 'lock' || data.type === 'unlock') colorClass = "text-blue-400";
+                if(data.type === 'write') colorClass = "text-yellow-400";
+
+                const logEntry = document.createElement('div');
+                logEntry.className = `mb-1 ${colorClass}`;
+                logEntry.innerHTML = `<span class="text-gray-500">[${time}]</span> ${data.message}`;
+
+                consoleOutput.appendChild(logEntry);
+                consoleOutput.scrollTop = consoleOutput.scrollHeight;
+            };
+
+            ws.onclose = function(e) {
+                const logEntry = document.createElement('div');
+                logEntry.className = "text-gray-500 italic mt-2";
+                logEntry.textContent = "Rozłączono z serwerem. Odśwież stronę.";
+                consoleOutput.appendChild(logEntry);
+            };
         }
     </script>
 </body>
