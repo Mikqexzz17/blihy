@@ -24,7 +24,7 @@ description = """
 
 app = FastAPI(
     title="Blihy API",
-    description=description,
+    description=description.replace("GitHub", "Platforma dla agentów AI"),
     version="1.0.0",
     contact={
         "name": "Blihy System",
@@ -39,9 +39,13 @@ REPOS_DIR = "repos"
 # Ensure the root repos directory exists
 os.makedirs(REPOS_DIR, exist_ok=True)
 
+class RepoCreateRequest(BaseModel):
+    limit: Optional[int] = None
+
 class RepoCreateResponse(BaseModel):
     repo_id: str
     message: str
+    limit: Optional[int] = None
 
 class FileRequest(BaseModel):
     content: str
@@ -68,6 +72,16 @@ class LockRequest(BaseModel):
 # Słownik do przechowywania blokad w pamięci (dla wersji produkcyjnej lepszy będzie Redis/DB)
 # Struktura: locks[repo_id][file_path] = agent_id
 locks = {}
+
+# Słowniki limitów użycia API
+repo_limits = {}
+repo_usage = {}
+
+def check_limit(repo_id: str):
+    if repo_id in repo_limits and repo_limits[repo_id] is not None:
+        if repo_usage.get(repo_id, 0) >= repo_limits[repo_id]:
+            raise HTTPException(status_code=429, detail="API Usage Limit Exceeded for this repository.")
+        repo_usage[repo_id] = repo_usage.get(repo_id, 0) + 1
 
 # Menedżer połączeń WebSocket
 class ConnectionManager:
@@ -120,17 +134,21 @@ def cleanup_temp_file(path: str):
         pass
 
 @app.post("/repo/create", response_model=RepoCreateResponse)
-def create_repo():
+def create_repo(req: Optional[RepoCreateRequest] = None):
     """Tworzy nowe wirtualne repozytorium dla agentów AI."""
     repo_id = str(uuid.uuid4())
     repo_path = os.path.join(REPOS_DIR, repo_id)
 
     try:
         os.makedirs(repo_path)
+        if req and req.limit is not None:
+            repo_limits[repo_id] = req.limit
+            repo_usage[repo_id] = 0
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to create repository: {str(e)}")
 
-    return RepoCreateResponse(repo_id=repo_id, message="Repository created successfully")
+    limit_val = repo_limits.get(repo_id)
+    return RepoCreateResponse(repo_id=repo_id, message="Repository created successfully", limit=limit_val)
 
 @app.get("/repo/{repo_id}/download")
 def download_repo(repo_id: uuid.UUID, background_tasks: BackgroundTasks):
@@ -208,30 +226,40 @@ def get_file(repo_id: uuid.UUID, file_path: str):
 @app.post("/repo/{repo_id}/run", response_model=RunResponse)
 async def run_command(repo_id: uuid.UUID, run_req: RunRequest):
     """Uruchamia skrypt python w danym repozytorium (bezpieczny Sandbox)."""
+    check_limit(str(repo_id))
     repo_path = os.path.abspath(os.path.join(REPOS_DIR, str(repo_id)))
 
     if not os.path.exists(repo_path):
         raise HTTPException(status_code=404, detail="Repository not found")
 
     cmd_parts = run_req.command.split()
-    if not cmd_parts or cmd_parts[0] not in ["python", "python3"]:
-         raise HTTPException(status_code=403, detail="Only 'python' commands are allowed for safety.")
+    if not cmd_parts or cmd_parts[0] not in ["python", "python3", "godot"]:
+         raise HTTPException(status_code=403, detail="Only 'python' or 'godot' commands are allowed for safety.")
 
-    if len(cmd_parts) > 1:
+    # Weryfikacja docelowego pliku (ochrona przed path traversal)
+    if cmd_parts[0] in ["python", "python3"] and len(cmd_parts) > 1:
         target_file = cmd_parts[1]
-        abs_target = os.path.abspath(os.path.join(repo_path, target_file))
-        if os.path.commonpath([repo_path]) != os.path.commonpath([repo_path, abs_target]):
-             raise HTTPException(status_code=403, detail="Access denied. Cannot run files outside repo.")
+        if not target_file.startswith("-"): # Ignorujemy flagi CLI
+            abs_target = os.path.abspath(os.path.join(repo_path, target_file))
+            if os.path.commonpath([repo_path]) != os.path.commonpath([repo_path, abs_target]):
+                 raise HTTPException(status_code=403, detail="Access denied. Cannot run files outside repo.")
 
     try:
-        # Uruchomienie bezpieczne przy użyciu Dockera.
-        # Mapujemy folder repozytorium jako volume do kontenera z Pythonem
-        docker_cmd = [
-            "docker", "run", "--rm",
-            "-v", f"{repo_path}:/app",
-            "-w", "/app",
-            "python:3.10-slim"
-        ] + cmd_parts
+        # Konfiguracja Dockera zależna od silnika
+        if cmd_parts[0] == "godot":
+            docker_cmd = [
+                "docker", "run", "--rm",
+                "-v", f"{repo_path}:/app",
+                "-w", "/app",
+                "barichello/godot-ci:4.3"
+            ] + cmd_parts
+        else:
+            docker_cmd = [
+                "docker", "run", "--rm",
+                "-v", f"{repo_path}:/app",
+                "-w", "/app",
+                "python:3.10-slim"
+            ] + cmd_parts
 
         result = subprocess.run(
             docker_cmd,
@@ -258,6 +286,7 @@ async def run_command(repo_id: uuid.UUID, run_req: RunRequest):
 @app.post("/repo/{repo_id}/file/{file_path:path}/lock")
 async def lock_file(repo_id: uuid.UUID, file_path: str, req: LockRequest):
     """Zamyka plik do edycji tylko dla podanego agent_id."""
+    check_limit(str(repo_id))
     r_id = str(repo_id)
     repo_path = os.path.join(REPOS_DIR, r_id)
     if not os.path.exists(repo_path):
@@ -282,6 +311,7 @@ async def lock_file(repo_id: uuid.UUID, file_path: str, req: LockRequest):
 @app.post("/repo/{repo_id}/file/{file_path:path}/unlock")
 async def unlock_file(repo_id: uuid.UUID, file_path: str, req: LockRequest):
     """Odblokowuje plik z edycji."""
+    check_limit(str(repo_id))
     r_id = str(repo_id)
     if r_id in locks and file_path in locks[r_id]:
         if locks[r_id][file_path] == req.agent_id:
@@ -301,6 +331,7 @@ async def unlock_file(repo_id: uuid.UUID, file_path: str, req: LockRequest):
 @app.post("/repo/{repo_id}/file/{file_path:path}")
 async def write_file(repo_id: uuid.UUID, file_path: str, file_data: FileRequest):
     """Tworzy lub nadpisuje plik w repozytorium."""
+    check_limit(str(repo_id))
     repo_path = os.path.join(REPOS_DIR, str(repo_id))
     full_path = os.path.join(repo_path, file_path)
 

@@ -200,3 +200,65 @@ def test_websocket_activity():
         data = websocket.receive_json()
         assert data["type"] == "write"
         assert "WS-Agent" in data["message"]
+
+def test_api_usage_limits():
+    # Utworzenie repo z limitem równym 2
+    response = client.post("/repo/create", json={"limit": 2})
+    assert response.status_code == 200
+    repo_id = response.json()["repo_id"]
+
+    # 1. Zapis pliku - limit: 1
+    r1 = client.post(
+        f"/repo/{repo_id}/file/test.py",
+        json={"content": "print('1')"}
+    )
+    assert r1.status_code == 200
+
+    # 2. Uruchomienie Sandboxa - limit: 2
+    r2 = client.post(
+        f"/repo/{repo_id}/run",
+        json={"command": "python test.py"}
+    )
+    assert r2.status_code == 200
+
+    # 3. Zapis pliku (ponad limit)
+    r3 = client.post(
+        f"/repo/{repo_id}/file/test2.py",
+        json={"content": "print('too many')"}
+    )
+    assert r3.status_code == 429
+    assert "Usage Limit Exceeded" in r3.json()["detail"]
+
+    # 4. Blokowanie (ponad limit)
+    r4 = client.post(
+        f"/repo/{repo_id}/file/test.py/lock",
+        json={"agent_id": "test"}
+    )
+    assert r4.status_code == 429
+
+def test_run_command_godot_validation():
+    # Utworzenie repozytorium
+    response = client.post("/repo/create")
+    repo_id = response.json()["repo_id"]
+
+    # Próba uruchomienia niedozwolonej komendy (np. ruby)
+    r1 = client.post(
+        f"/repo/{repo_id}/run",
+        json={"command": "ruby test.rb"}
+    )
+    assert r1.status_code == 403
+
+    # Próba uruchomienia poprawnej komendy (python) - pominie błąd 125, ale status endpointu 200
+    r2 = client.post(
+        f"/repo/{repo_id}/run",
+        json={"command": "python test.py"}
+    )
+    assert r2.status_code == 200
+
+    # Próba uruchomienia poprawnej komendy (godot)
+    r3 = client.post(
+        f"/repo/{repo_id}/run",
+        json={"command": "godot --headless"}
+    )
+    assert r3.status_code == 200
+    assert "returncode" in r3.json()
