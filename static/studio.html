@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Blihy Studio - AI Workspace</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+    </style>
+</head>
+<body class="bg-gray-50 h-screen flex flex-col overflow-hidden">
+    <!-- Navbar -->
+    <nav class="bg-gray-900 text-white flex justify-between items-center px-4 py-3 shadow-md">
+        <div class="flex items-center space-x-4">
+            <span class="font-bold text-xl tracking-tight text-blue-400">Blihy Studio</span>
+            <span class="text-xs bg-gray-800 px-2 py-1 rounded text-gray-400" id="repo-id-display">Loading...</span>
+        </div>
+        <div class="flex items-center space-x-4">
+            <button onclick="cloneRepo()" class="text-sm border border-gray-600 hover:bg-gray-800 px-3 py-1.5 rounded transition">Zakończ i Migruj</button>
+            <button onclick="downloadZip()" class="text-sm bg-blue-600 hover:bg-blue-500 px-3 py-1.5 rounded transition">Pobierz ZIP</button>
+            <a href="/" class="text-sm text-gray-400 hover:text-white">Wyjdź</a>
+        </div>
+    </nav>
+
+    <!-- Modal for Clone Result -->
+    <div id="clone-modal" class="fixed inset-0 bg-gray-900 bg-opacity-80 hidden z-50 flex items-center justify-center">
+        <div class="bg-white rounded-lg p-6 max-w-lg w-full text-center shadow-2xl">
+            <h3 class="text-2xl font-bold text-gray-800 mb-4">Projekt Pomyślnie Skopiowany</h3>
+            <p class="text-gray-600 mb-4">Migracja zakończona. Twój nowy token projektu to:</p>
+            <div class="bg-gray-100 p-3 rounded mb-6 select-all font-mono text-blue-600 font-bold" id="new-repo-id"></div>
+            <p class="text-sm text-gray-500 mb-6">Skopiuj ten klucz i przekaż swojemu Agentowi AI, aby kontynuować od tego miejsca jako nowy projekt.</p>
+            <button onclick="window.location.href='/'" class="bg-blue-600 text-white px-6 py-2 rounded font-medium hover:bg-blue-700">Wróć na Stronę Główną</button>
+        </div>
+    </div>
+
+    <!-- Main Workspace -->
+    <div class="flex flex-1 overflow-hidden">
+
+        <!-- Left Panel: Chat -->
+        <div class="w-1/3 bg-white border-r flex flex-col">
+            <div class="bg-gray-100 p-3 border-b flex justify-between items-center">
+                <h2 class="font-semibold text-gray-700">Komunikacja (Agenty AI)</h2>
+                <select id="agent-selector" class="text-sm border-gray-300 rounded focus:ring-blue-500 p-1">
+                    <option value="">Wybierz Agenta</option>
+                </select>
+            </div>
+
+            <!-- Chat history -->
+            <div id="chat-box" class="flex-1 p-4 overflow-y-auto space-y-4 bg-gray-50">
+                <div class="text-center text-xs text-gray-400 my-2">Początek konwersacji</div>
+                <!-- messages will appear here -->
+            </div>
+
+            <!-- Chat input -->
+            <div class="p-3 border-t bg-white">
+                <form id="chat-form" class="flex space-x-2" onsubmit="sendMessage(event)">
+                    <input type="text" id="chat-input" class="flex-1 border rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500" placeholder="Napisz do wybranego agenta...">
+                    <button type="submit" class="bg-blue-600 text-white px-4 py-2 rounded-md text-sm hover:bg-blue-700">Wyślij</button>
+                </form>
+            </div>
+        </div>
+
+        <!-- Right Panel: Files & Console -->
+        <div class="w-2/3 flex flex-col bg-gray-100">
+            <!-- Files Header -->
+            <div class="bg-white p-3 border-b flex justify-between items-center shadow-sm z-10">
+                <div class="flex items-center space-x-3">
+                    <h2 class="font-semibold text-gray-700">Pliki Projektu</h2>
+                    <button onclick="refreshFiles()" class="text-xs text-blue-600 hover:underline">Odśwież</button>
+                </div>
+                <div class="flex items-center space-x-2">
+                    <button onclick="runSandbox('python script.py')" class="text-sm border border-gray-300 bg-white hover:bg-gray-50 px-3 py-1.5 rounded transition">Test (Python)</button>
+                    <button onclick="runSandbox('godot --headless')" class="text-sm bg-purple-600 text-white hover:bg-purple-500 px-3 py-1.5 rounded transition">Uruchom Godot</button>
+                </div>
+            </div>
+
+            <!-- Files List -->
+            <div class="flex-1 p-4 overflow-y-auto">
+                <div class="bg-white rounded-lg shadow-sm border p-4 min-h-full">
+                    <ul id="file-list" class="space-y-2 text-sm text-gray-600">
+                        <li class="italic text-gray-400">Ładowanie plików...</li>
+                    </ul>
+                </div>
+            </div>
+
+            <!-- Terminal / Console -->
+            <div class="h-1/3 bg-gray-900 border-t-4 border-gray-800 flex flex-col">
+                <div class="px-4 py-1 bg-gray-800 text-xs font-semibold text-gray-400 flex justify-between">
+                    <span>LIVE TERMINAL (WebSockets)</span>
+                    <button onclick="document.getElementById('terminal-output').innerHTML=''" class="hover:text-white">Clear</button>
+                </div>
+                <div id="terminal-output" class="flex-1 p-3 overflow-y-auto font-mono text-xs text-green-400">
+                    <div>System zinicjalizowany. Oczekuję na połączenie...</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const urlParams = new URLSearchParams(window.location.search);
+        const repoId = urlParams.get('repo_id');
+        let ws = null;
+
+        if (!repoId) {
+            alert("Brak ID repozytorium. Wracam na stronę główną.");
+            window.location.href = "/";
+        }
+
+        document.getElementById('repo-id-display').textContent = repoId;
+
+        async function init() {
+            await loadAgents();
+            await refreshFiles();
+            connectWebSocket();
+        }
+
+        async function loadAgents() {
+            try {
+                const res = await fetch(`/repo/${repoId}/agents`);
+                const data = await res.json();
+                const selector = document.getElementById('agent-selector');
+                selector.innerHTML = '';
+
+                if (data.agents.length === 0) {
+                    selector.innerHTML = '<option value="">Brak agentów</option>';
+                    return;
+                }
+
+                data.agents.forEach(agent => {
+                    const opt = document.createElement('option');
+                    opt.value = agent.agent_id;
+                    opt.textContent = `${agent.agent_id} ${agent.is_leader ? '(Lider)' : ''}`;
+                    selector.appendChild(opt);
+                });
+            } catch(e) {
+                console.error(e);
+            }
+        }
+
+        async function refreshFiles() {
+            try {
+                const res = await fetch(`/repo/${repoId}/files`);
+                const data = await res.json();
+                const list = document.getElementById('file-list');
+
+                if (data.files.length === 0) {
+                    list.innerHTML = '<li class="italic text-gray-400">Repozytorium jest puste.</li>';
+                    return;
+                }
+
+                list.innerHTML = '';
+                data.files.forEach(file => {
+                    const li = document.createElement('li');
+                    li.className = "flex items-center space-x-2";
+                    li.innerHTML = `
+                        <svg class="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z"></path></svg>
+                        <a href="/repo/${repoId}/file/${file}" target="_blank" class="hover:text-blue-600 hover:underline">${file}</a>
+                    `;
+                    list.appendChild(li);
+                });
+            } catch(e) {
+                console.error(e);
+            }
+        }
+
+        async function sendMessage(e) {
+            e.preventDefault();
+            const input = document.getElementById('chat-input');
+            const agentId = document.getElementById('agent-selector').value;
+            const msg = input.value.trim();
+
+            if(!msg || !agentId) return;
+
+            input.value = '';
+
+            // Add user message to UI immediately
+            appendChat('User', msg, true);
+
+            try {
+                const res = await fetch(`/repo/${repoId}/chat`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ message: msg, target_agent_id: agentId })
+                });
+                if(!res.ok) {
+                    const err = await res.json();
+                    logTerminal(`Error sending message: ${err.detail}`, 'error');
+                }
+            } catch(e) {
+                logTerminal(`Network error: ${e.message}`, 'error');
+            }
+        }
+
+        function appendChat(sender, message, isUser=false) {
+            const box = document.getElementById('chat-box');
+            const div = document.createElement('div');
+            const bgClass = isUser ? 'bg-blue-100 text-blue-900 ml-auto' : 'bg-white border text-gray-800';
+            div.className = `p-3 rounded-lg max-w-[85%] text-sm ${bgClass}`;
+
+            const senderDiv = document.createElement('div');
+            senderDiv.className = "font-bold text-xs mb-1 opacity-75";
+            senderDiv.textContent = sender;
+
+            const messageDiv = document.createElement('div');
+            messageDiv.textContent = message;
+            messageDiv.style.whiteSpace = 'pre-wrap';
+
+            div.appendChild(senderDiv);
+            div.appendChild(messageDiv);
+
+            box.appendChild(div);
+            box.scrollTop = box.scrollHeight;
+        }
+
+        async function runSandbox(cmd) {
+            logTerminal(`> Executing: ${cmd}`);
+            try {
+                const res = await fetch(`/repo/${repoId}/run`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ command: cmd })
+                });
+                const data = await res.json();
+                if(data.stdout) logTerminal(data.stdout, 'success');
+                if(data.stderr) logTerminal(data.stderr, 'error');
+                logTerminal(`Process exited with code: ${data.returncode}`);
+            } catch(e) {
+                logTerminal(`Sandbox error: ${e.message}`, 'error');
+            }
+        }
+
+        function downloadZip() {
+            window.open(`/repo/${repoId}/download`, '_blank');
+        }
+
+        async function cloneRepo() {
+            if(!confirm("Czy na pewno chcesz sklonować to repozytorium do nowego środowiska i zakończyć tutaj pracę?")) return;
+            try {
+                logTerminal("Klonowanie repozytorium...", "info");
+                const res = await fetch(`/repo/${repoId}/clone`, { method: 'POST' });
+                if(!res.ok) throw new Error("Błąd podczas klonowania");
+                const data = await res.json();
+
+                document.getElementById('new-repo-id').textContent = data.repo_id;
+                document.getElementById('clone-modal').classList.remove('hidden');
+
+            } catch(e) {
+                logTerminal(`Błąd: ${e.message}`, "error");
+            }
+        }
+
+        function logTerminal(msg, type='info') {
+            const term = document.getElementById('terminal-output');
+            const div = document.createElement('div');
+            div.className = 'mb-1';
+            if(type === 'error') div.classList.add('text-red-400');
+            else if(type === 'success') div.classList.add('text-blue-300');
+
+            const time = new Date().toLocaleTimeString();
+
+            const timeSpan = document.createElement('span');
+            timeSpan.className = 'opacity-50';
+            timeSpan.textContent = `[${time}] `;
+
+            const msgSpan = document.createElement('span');
+            msgSpan.textContent = msg;
+
+            div.appendChild(timeSpan);
+            div.appendChild(msgSpan);
+
+            term.appendChild(div);
+            term.scrollTop = term.scrollHeight;
+        }
+
+        function connectWebSocket() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            ws = new WebSocket(`${protocol}//${window.location.host}/repo/${repoId}/ws`);
+
+            ws.onmessage = function(event) {
+                const data = JSON.parse(event.data);
+
+                if (data.type === 'chat') {
+                    if (data.sender !== 'User') {
+                        appendChat(data.sender, data.message, false);
+                    }
+                } else {
+                    let logType = 'info';
+                    if(data.type === 'error' || data.status === 'error') logType = 'error';
+                    logTerminal(data.message, logType);
+
+                    if(data.type === 'write') {
+                        refreshFiles();
+                    }
+                }
+            };
+
+            ws.onclose = () => logTerminal('WebSocket disconnected.', 'error');
+        }
+
+        // Init
+        init();
+    </script>
+</body>
+</html>

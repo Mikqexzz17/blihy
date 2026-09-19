@@ -2,11 +2,14 @@ import os
 import uuid
 import shutil
 import subprocess
+import shlex
 import tempfile
 import asyncio
 import json
+import re
 from fastapi import FastAPI, HTTPException, BackgroundTasks, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
+import litellm
 from fastapi.responses import FileResponse as FastAPIFileResponse
 from pydantic import BaseModel
 from typing import List, Optional
@@ -47,6 +50,20 @@ class RepoCreateResponse(BaseModel):
     message: str
     limit: Optional[int] = None
 
+class AgentConfig(BaseModel):
+    agent_id: str
+    role_description: str
+    api_key: str
+    model: str
+    is_leader: bool = False
+
+class RepoAgentsRequest(BaseModel):
+    agents: List[AgentConfig]
+
+class ChatRequest(BaseModel):
+    message: str
+    target_agent_id: str
+
 class FileRequest(BaseModel):
     content: str
     agent_id: Optional[str] = None
@@ -76,6 +93,10 @@ locks = {}
 # Słowniki limitów użycia API
 repo_limits = {}
 repo_usage = {}
+
+# Słownik przechowujący konfigurację agentów w danym repo
+# repo_agents[repo_id] = [AgentConfig, ...]
+repo_agents = {}
 
 def check_limit(repo_id: str):
     if repo_id in repo_limits and repo_limits[repo_id] is not None:
@@ -125,6 +146,119 @@ def serve_home():
     """Zwraca stronę główną (Landing Page)."""
     return FastAPIFileResponse("static/index.html")
 
+async def process_agent_message(repo_id: str, repo_path: str, agent: AgentConfig, user_message: str, other_agents: List[AgentConfig]):
+    """Funkcja w tle wykonująca zapytania do LLM."""
+    try:
+        # Wspólna wiedza o Godocie
+        godot_knowledge = (
+            "GODOT ENGINE MASTER KNOWLEDGE:\\n"
+            "1. You have full access to create and modify a Godot 4 project.\\n"
+            "2. Always ensure a `project.godot` file is created at the root if it doesn't exist.\\n"
+            "3. You understand the difference between `.gd` (GDScript), `.tscn` (PackedScene), and `.tres` (Resources).\\n"
+            "4. When creating `.tscn` files, write the raw text format correctly (e.g., `[gd_scene load_steps=...]`, `[node name=...]`).\\n"
+            "5. Connect signals correctly inside `.tscn` files or via code (`_ready()` -> `connect()`).\\n"
+            "6. Structure the project logically (e.g., `res://scenes/`, `res://scripts/`).\\n"
+            "7. The sandbox runs `godot --headless`. Therefore, any tests should ideally automatically quit (`get_tree().quit()`) after successful validation, or run indefinitely for manual UI testing if requested.\\n"
+        )
+
+        if agent.is_leader:
+            # Prompt dla lidera
+            sub_agents_info = "\\n".join([f"- {a.agent_id} (Model: {a.model}): {a.role_description}" for a in other_agents])
+            system_prompt = (
+                f"You are the LEADER AI for a Godot 4 project. Your role: {agent.role_description}.\\n"
+                f"{godot_knowledge}\\n"
+                f"You have the following team members to delegate work to:\\n{sub_agents_info}\\n"
+                "Your job is to architect the game, figure out what files are needed, break down the user's request into actionable tasks, and delegate them to your team members based on their roles.\\n"
+                "You MUST respond STRICTLY in valid JSON format, with no other text, containing tasks for your sub-agents:\\n"
+                '{"tasks": [{"agent_id": "Agent-Name", "task_description": "Specific instruction on what .gd or .tscn file to create and how it should work"}]}'
+            )
+        else:
+            # Prompt dla wykonawcy
+            system_prompt = (
+                f"You are a WORKER AI for a Godot 4 project. Your role: {agent.role_description}.\\n"
+                f"{godot_knowledge}\\n"
+                "You must write the requested Godot code, scenes, or configurations based on the instructions.\\n"
+                "To create or modify a file, you MUST use the following format exactly in your response:\\n"
+                "[WRITE:filename.ext]\\n"
+                "your content here\\n"
+                "[/WRITE]\\n"
+                "You can write multiple files by repeating the [WRITE] block.\\n"
+                "If the instruction is to create a gun and jumping mechanics, actually write the character controller in `.gd` and the node structure in `.tscn`."
+            )
+
+        # Wywołanie modelu LLM
+        response = await litellm.acompletion(
+            model=agent.model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message}
+            ],
+            api_key=agent.api_key
+        )
+
+        llm_reply = response.choices[0].message.content
+
+        # Broadcast odpowiedzi LLM
+        await manager.broadcast(repo_id, {
+            "type": "chat",
+            "sender": agent.agent_id,
+            "target": "User" if not agent.is_leader else "Team",
+            "message": llm_reply
+        })
+
+        if agent.is_leader:
+            # Parsowanie JSON i delegowanie zadań
+            try:
+                # Oczyszczenie z markdowna (jesli model doda ```json)
+                json_str = llm_reply.replace("```json", "").replace("```", "").strip()
+                tasks_data = json.loads(json_str)
+                for task in tasks_data.get("tasks", []):
+                    target_id = task.get("agent_id")
+                    target_task = task.get("task_description")
+                    target_agent = next((a for a in other_agents if a.agent_id == target_id), None)
+                    if target_agent:
+                        await manager.broadcast(repo_id, {
+                            "type": "chat",
+                            "sender": agent.agent_id,
+                            "target": target_id,
+                            "message": f"Delegated task: {target_task}"
+                        })
+                        # Rekurencyjne wywołanie podwykonawcy w tle
+                        asyncio.create_task(process_agent_message(repo_id, repo_path, target_agent, target_task, []))
+            except Exception as e:
+                await manager.broadcast(repo_id, {
+                    "type": "error",
+                    "message": f"Leader JSON parsing error: {str(e)}"
+                })
+        else:
+            # Parsowanie znaczników [WRITE:file]
+            pattern = r"\[WRITE:(.+?)\](.*?)\[/WRITE\]"
+            matches = re.finditer(pattern, llm_reply, re.DOTALL)
+            for match in matches:
+                file_name = match.group(1).strip()
+                file_content = match.group(2).strip()
+
+                # Bezpieczny zapis
+                full_path = os.path.join(repo_path, file_name)
+                abs_repo_path = os.path.abspath(repo_path)
+                abs_full_path = os.path.abspath(full_path)
+
+                if os.path.commonpath([abs_repo_path]) == os.path.commonpath([abs_repo_path, abs_full_path]):
+                    os.makedirs(os.path.dirname(full_path), exist_ok=True)
+                    with open(full_path, 'w', encoding='utf-8') as f:
+                        f.write(file_content)
+
+                    await manager.broadcast(repo_id, {
+                        "type": "write",
+                        "message": f"Agent {agent.agent_id} wrote to {file_name}"
+                    })
+
+    except Exception as e:
+        await manager.broadcast(repo_id, {
+            "type": "error",
+            "message": f"Agent {agent.agent_id} error: {str(e)}"
+        })
+
 def cleanup_temp_file(path: str):
     """Zadanie w tle usuwające plik tymczasowy po wysłaniu."""
     try:
@@ -149,6 +283,87 @@ def create_repo(req: Optional[RepoCreateRequest] = None):
 
     limit_val = repo_limits.get(repo_id)
     return RepoCreateResponse(repo_id=repo_id, message="Repository created successfully", limit=limit_val)
+
+@app.post("/repo/{repo_id}/agents")
+def configure_agents(repo_id: uuid.UUID, req: RepoAgentsRequest):
+    """Zapisuje konfigurację agentów (Role, API Keys) dla danego projektu."""
+    r_id = str(repo_id)
+    repo_path = os.path.join(REPOS_DIR, r_id)
+    if not os.path.exists(repo_path):
+        raise HTTPException(status_code=404, detail="Repository not found")
+
+    repo_agents[r_id] = req.agents
+    return {"message": "Agents configured successfully"}
+
+@app.get("/repo/{repo_id}/agents")
+def get_agents(repo_id: uuid.UUID):
+    r_id = str(repo_id)
+    if r_id not in repo_agents:
+        return {"agents": []}
+
+    # Nie zwracamy kluczy API na zewnątrz w GET
+    safe_agents = []
+    for a in repo_agents[r_id]:
+        safe_agents.append({
+            "agent_id": a.agent_id,
+            "role_description": a.role_description,
+            "model": a.model,
+            "is_leader": a.is_leader
+        })
+    return {"agents": safe_agents}
+
+@app.post("/repo/{repo_id}/chat")
+async def chat_with_agent(repo_id: uuid.UUID, req: ChatRequest, background_tasks: BackgroundTasks):
+    """Główny endpoint czatu z danym agentem."""
+    check_limit(str(repo_id))
+    r_id = str(repo_id)
+    repo_path = os.path.join(REPOS_DIR, r_id)
+
+    if not os.path.exists(repo_path):
+        raise HTTPException(status_code=404, detail="Repository not found")
+
+    if r_id not in repo_agents:
+        raise HTTPException(status_code=400, detail="Agents not configured for this repo")
+
+    # Znajdź agenta
+    target_agent = next((a for a in repo_agents[r_id] if a.agent_id == req.target_agent_id), None)
+    if not target_agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    # Ustal listę innych agentów do przekazania liderowi
+    other_agents = [a for a in repo_agents[r_id] if a.agent_id != target_agent.agent_id]
+
+    # Broadcast wiadomości od użytkownika
+    await manager.broadcast(r_id, {
+        "type": "chat",
+        "sender": "User",
+        "target": target_agent.agent_id,
+        "message": req.message
+    })
+
+    # Task w tle - wołanie LLM
+    background_tasks.add_task(process_agent_message, r_id, repo_path, target_agent, req.message, other_agents)
+
+    return {"message": "Message sent to agent."}
+
+@app.post("/repo/{repo_id}/clone", response_model=RepoCreateResponse)
+def clone_repo(repo_id: uuid.UUID):
+    """Klonuje istniejące repozytorium do nowego UUID, np. jako zapis zakończonego projektu."""
+    r_id = str(repo_id)
+    source_path = os.path.join(REPOS_DIR, r_id)
+
+    if not os.path.exists(source_path):
+        raise HTTPException(status_code=404, detail="Source repository not found")
+
+    new_repo_id = str(uuid.uuid4())
+    new_repo_path = os.path.join(REPOS_DIR, new_repo_id)
+
+    try:
+        shutil.copytree(source_path, new_repo_path)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to clone repository: {str(e)}")
+
+    return RepoCreateResponse(repo_id=new_repo_id, message="Repository cloned successfully. Ready for next phase.")
 
 @app.get("/repo/{repo_id}/download")
 def download_repo(repo_id: uuid.UUID, background_tasks: BackgroundTasks):
@@ -232,7 +447,7 @@ async def run_command(repo_id: uuid.UUID, run_req: RunRequest):
     if not os.path.exists(repo_path):
         raise HTTPException(status_code=404, detail="Repository not found")
 
-    cmd_parts = run_req.command.split()
+    cmd_parts = shlex.split(run_req.command)
     if not cmd_parts or cmd_parts[0] not in ["python", "python3", "godot"]:
          raise HTTPException(status_code=403, detail="Only 'python' or 'godot' commands are allowed for safety.")
 

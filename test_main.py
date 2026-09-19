@@ -201,6 +201,29 @@ def test_websocket_activity():
         assert data["type"] == "write"
         assert "WS-Agent" in data["message"]
 
+def test_clone_repo():
+    response = client.post("/repo/create")
+    repo_id = response.json()["repo_id"]
+
+    # Utworzenie pliku w starym repo
+    client.post(
+        f"/repo/{repo_id}/file/important.gd",
+        json={"content": "test cloning"}
+    )
+
+    # Sklonowanie
+    clone_response = client.post(f"/repo/{repo_id}/clone")
+    assert clone_response.status_code == 200
+    new_repo_id = clone_response.json()["repo_id"]
+
+    # Sprawdzenie zawartości nowego repo
+    file_list = client.get(f"/repo/{new_repo_id}/files")
+    assert "important.gd" in file_list.json()["files"]
+
+    # Sprawdzenie odczytu pliku w nowym repo
+    read_file = client.get(f"/repo/{new_repo_id}/file/important.gd")
+    assert read_file.json()["content"] == "test cloning"
+
 def test_api_usage_limits():
     # Utworzenie repo z limitem równym 2
     response = client.post("/repo/create", json={"limit": 2})
@@ -262,3 +285,89 @@ def test_run_command_godot_validation():
     )
     assert r3.status_code == 200
     assert "returncode" in r3.json()
+
+def test_add_agents():
+    response = client.post("/repo/create")
+    repo_id = response.json()["repo_id"]
+
+    agent_data = {
+        "agents": [
+            {
+                "agent_id": "Lider",
+                "role_description": "Rozdzielasz zadania",
+                "api_key": "test_key",
+                "model": "gpt-4",
+                "is_leader": True
+            },
+            {
+                "agent_id": "Programista",
+                "role_description": "Piszesz kod",
+                "api_key": "test_key2",
+                "model": "gpt-3.5-turbo"
+            }
+        ]
+    }
+
+    r1 = client.post(f"/repo/{repo_id}/agents", json=agent_data)
+    assert r1.status_code == 200
+
+    r2 = client.get(f"/repo/{repo_id}/agents")
+    assert r2.status_code == 200
+
+    agents = r2.json()["agents"]
+    assert len(agents) == 2
+    # GET shouldn't expose API keys
+    assert "api_key" not in agents[0]
+    assert agents[0]["agent_id"] == "Lider"
+    assert agents[0]["is_leader"] is True
+
+def test_chat_endpoint_mocked(monkeypatch):
+    import main
+
+    response = client.post("/repo/create")
+    repo_id = response.json()["repo_id"]
+
+    agent_data = {
+        "agents": [
+            {
+                "agent_id": "MockAgent",
+                "role_description": "Test",
+                "api_key": "test_key",
+                "model": "gpt-4",
+                "is_leader": False
+            }
+        ]
+    }
+    client.post(f"/repo/{repo_id}/agents", json=agent_data)
+
+    # Przygotowanie mocka wywołania LLM
+    class MockMessage:
+        content = "[WRITE:test_file.txt] mock content [/WRITE]"
+
+    class MockChoice:
+        message = MockMessage()
+
+    class MockResponse:
+        choices = [MockChoice()]
+
+    async def mock_acompletion(*args, **kwargs):
+        return MockResponse()
+
+    monkeypatch.setattr(main.litellm, "acompletion", mock_acompletion)
+
+    # 1. Wyslanie wiadomości w interfejsie API powinno zwrocic status 200 od razu (background task leci w tle)
+    chat_resp = client.post(
+        f"/repo/{repo_id}/chat",
+        json={"message": "zrob plik", "target_agent_id": "MockAgent"}
+    )
+    assert chat_resp.status_code == 200
+
+    # TestClient w FastAPI odpala background tasks po zwroceniu response synchronicznie w testach
+    # Zatem plik powinien być już zapisany
+    file_check = client.get(f"/repo/{repo_id}/files")
+    assert file_check.status_code == 200
+    assert "test_file.txt" in file_check.json()["files"]
+
+    read_file = client.get(f"/repo/{repo_id}/file/test_file.txt")
+    assert read_file.status_code == 200
+    assert read_file.json()["content"] == "mock content"

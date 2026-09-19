@@ -42,32 +42,55 @@
                     <span class="block gradient-text">Platforma dla agentów AI.</span>
                 </h1>
                 <p class="mt-4 max-w-2xl mx-auto text-xl text-gray-500">
-                    Blihy to platforma pozwalająca sztucznej inteligencji na zarządzanie plikami, współpracę wieloosobową w trybie <strong>Doublend</strong> i testowanie kodu w odizolowanym <strong>Sandboxie</strong>.
+                    Blihy to platforma pozwalająca sztucznej inteligencji na zarządzanie plikami, współpracę wieloosobową w trybie <strong>Doublend</strong> i testowanie kodu w odizolowanym <strong>Sandboxie</strong> (np. w Godot Engine).
                 </p>
                 <div class="mt-8 flex flex-col items-center justify-center gap-4">
-                    <div class="flex flex-row items-center gap-2">
-                        <label for="repo-limit" class="text-sm font-medium text-gray-700">Limit operacji API (opcjonalnie):</label>
-                        <input type="number" id="repo-limit" class="shadow-sm border-gray-300 rounded-md py-1 px-2 border focus:ring-blue-500 focus:border-blue-500 sm:text-sm w-32" placeholder="np. 100">
-                    </div>
-                    <div class="inline-flex rounded-md shadow">
-                        <button onclick="createRepo()" class="inline-flex items-center justify-center px-5 py-3 border border-transparent text-base font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700">
-                            Utwórz Repozytorium dla AI
+                    <div class="inline-flex rounded-md shadow gap-4">
+                        <button onclick="showCreatorModal()" class="inline-flex items-center justify-center px-5 py-3 border border-transparent text-base font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700">
+                            Buduj w Godot (Kreator AI)
                         </button>
                     </div>
                 </div>
-                <div id="repo-result" class="mt-4 text-sm text-gray-700 hidden p-4 bg-green-50 rounded-md border border-green-200 inline-block"></div>
-                <div id="download-section" class="mt-4 hidden">
-                    <button id="download-btn" onclick="downloadRepo()" class="inline-flex items-center justify-center px-4 py-2 border border-gray-300 shadow-sm text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50">
-                        <svg class="-ml-1 mr-2 h-5 w-5 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
-                        Pobierz Repozytorium (ZIP)
+            </div>
+        </div>
+
+        <!-- Kreator Projektu Modal -->
+        <div id="creator-modal" class="fixed inset-0 bg-gray-500 bg-opacity-75 hidden z-50 flex items-center justify-center overflow-y-auto">
+            <div class="bg-white rounded-lg px-4 pt-5 pb-4 text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:max-w-4xl w-full sm:p-6">
+                <div class="flex justify-between items-center mb-5">
+                    <h3 class="text-2xl leading-6 font-semibold text-gray-900" id="modal-title">
+                        Kreator Projektu w Godot
+                    </h3>
+                    <button onclick="hideCreatorModal()" class="text-gray-400 hover:text-gray-500 focus:outline-none">
+                        <svg class="h-6 w-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
                     </button>
                 </div>
-                <!-- Console -->
-                <div id="console-section" class="mt-8 hidden mx-auto max-w-3xl text-left">
-                    <h3 class="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-2">Konsola Aktywności AI</h3>
-                    <div id="console-output" class="bg-gray-900 rounded-lg p-4 h-48 overflow-y-auto font-mono text-sm text-green-400 shadow-inner">
-                        <div>Oczekuję na aktywność agentów...</div>
+                <div class="mt-2 space-y-4">
+                    <div class="grid grid-cols-2 gap-4">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700">Limit operacji API (opcjonalnie)</label>
+                            <input type="number" id="repo-limit" class="mt-1 shadow-sm border-gray-300 rounded-md p-2 border w-full focus:ring-blue-500 focus:border-blue-500" placeholder="np. 100">
+                        </div>
                     </div>
+
+                    <hr class="my-4">
+                    <div class="flex justify-between items-center">
+                        <h4 class="text-lg font-medium text-gray-900">Agenty AI</h4>
+                        <button type="button" onclick="addAgentRow()" class="inline-flex items-center px-3 py-1.5 border border-transparent text-xs font-medium rounded text-blue-700 bg-blue-100 hover:bg-blue-200 focus:outline-none">
+                            + Dodaj Agenta
+                        </button>
+                    </div>
+                    <p class="text-sm text-gray-500">Zdefiniuj z jakich kluczy LLM będzie korzystał ten projekt i ustaw Głównego Modelu (Lidera).</p>
+
+                    <div id="agents-container" class="space-y-4 max-h-96 overflow-y-auto pr-2">
+                        <!-- Agent rows will be injected here -->
+                    </div>
+
+                </div>
+                <div class="mt-5 sm:mt-6 flex justify-end">
+                    <button type="button" onclick="submitCreator()" class="inline-flex justify-center w-full rounded-md border border-transparent shadow-sm px-4 py-2 bg-blue-600 text-base font-medium text-white hover:bg-blue-700 focus:outline-none sm:w-auto sm:text-sm">
+                        Wygeneruj środowisko
+                    </button>
                 </div>
             </div>
         </div>
@@ -125,78 +148,117 @@
     </div>
 
     <script>
-        let currentRepoId = null;
-        let ws = null;
+        let agentCount = 0;
 
-        async function createRepo() {
-            try {
-                const limitInput = document.getElementById('repo-limit').value;
-                const bodyData = limitInput ? { limit: parseInt(limitInput) } : {};
-
-                const response = await fetch('/repo/create', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify(bodyData)
-                });
-                const data = await response.json();
-                const resultDiv = document.getElementById('repo-result');
-                const downloadSection = document.getElementById('download-section');
-                resultDiv.classList.remove('hidden');
-
-                if(response.ok) {
-                    currentRepoId = data.repo_id;
-                    resultDiv.innerHTML = `<strong>Sukces!</strong> Twój token repozytorium to:<br><code class="text-lg bg-gray-100 px-2 py-1 rounded block mt-2 text-gray-900">${data.repo_id}</code><br><span class="text-xs text-gray-500 mt-2 block">Skopiuj ten token i przekaż go swojemu asystentowi AI.</span>`;
-                    downloadSection.classList.remove('hidden');
-                    connectWebSocket();
-                } else {
-                    resultDiv.innerHTML = `<span class="text-red-500">Błąd: ${data.detail}</span>`;
-                }
-            } catch (error) {
-                alert('Błąd podczas łączenia z API.');
+        function showCreatorModal() {
+            document.getElementById('creator-modal').classList.remove('hidden');
+            if(agentCount === 0) {
+                addAgentRow(true); // dodaj jednego agenta na start (jako lidera)
             }
         }
 
-        function downloadRepo() {
-            if(!currentRepoId) return;
-            window.open(`/repo/${currentRepoId}/download`, '_blank');
+        function hideCreatorModal() {
+            document.getElementById('creator-modal').classList.add('hidden');
         }
 
-        function connectWebSocket() {
-            if (ws) ws.close();
-            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsUrl = `${protocol}//${window.location.host}/repo/${currentRepoId}/ws`;
+        function addAgentRow(isLeader = false) {
+            agentCount++;
+            const container = document.getElementById('agents-container');
+            const row = document.createElement('div');
+            row.className = 'p-4 border rounded-md bg-gray-50 space-y-3 relative';
+            row.id = `agent-row-${agentCount}`;
 
-            ws = new WebSocket(wsUrl);
-            const consoleSection = document.getElementById('console-section');
-            const consoleOutput = document.getElementById('console-output');
+            row.innerHTML = `
+                <div class="flex justify-between items-center">
+                    <label class="flex items-center space-x-2">
+                        <input type="radio" name="leader" value="${agentCount}" class="text-blue-600 focus:ring-blue-500 h-4 w-4" ${isLeader ? 'checked' : ''}>
+                        <span class="text-sm font-bold text-gray-700">Lider Zespołu</span>
+                    </label>
+                    <button type="button" onclick="document.getElementById('agent-row-${agentCount}').remove()" class="text-red-500 hover:text-red-700 text-sm">Usuń</button>
+                </div>
+                <div class="grid grid-cols-2 gap-4">
+                    <div>
+                        <label class="block text-xs font-medium text-gray-700">Nazwa Agenta (ID)</label>
+                        <input type="text" class="agent-id mt-1 p-2 block w-full shadow-sm sm:text-sm border-gray-300 border rounded-md" placeholder="np. GlownyArchitekt" value="${isLeader ? 'Lider' : 'Programista'}" required>
+                    </div>
+                    <div>
+                        <label class="block text-xs font-medium text-gray-700">Model LLM</label>
+                        <input type="text" class="agent-model mt-1 p-2 block w-full shadow-sm sm:text-sm border-gray-300 border rounded-md" placeholder="np. gpt-4o" value="gpt-4o" required>
+                    </div>
+                    <div class="col-span-2">
+                        <label class="block text-xs font-medium text-gray-700">Klucz API</label>
+                        <input type="password" class="agent-api-key mt-1 p-2 block w-full shadow-sm sm:text-sm border-gray-300 border rounded-md" placeholder="sk-..." required>
+                    </div>
+                    <div class="col-span-2">
+                        <label class="block text-xs font-medium text-gray-700">Opis zadania (Rola)</label>
+                        <textarea class="agent-role mt-1 p-2 block w-full shadow-sm sm:text-sm border-gray-300 border rounded-md" rows="2" required placeholder="np. Jesteś głównym menadżerem, rozdzielasz zadania.">${isLeader ? 'Jesteś liderem.' : 'Programujesz mechaniki w Godot.'}</textarea>
+                    </div>
+                </div>
+            `;
+            container.appendChild(row);
+        }
 
-            consoleSection.classList.remove('hidden');
+        async function submitCreator() {
+            const limitInput = document.getElementById('repo-limit').value;
+            const bodyData = limitInput ? { limit: parseInt(limitInput) } : {};
 
-            ws.onmessage = function(event) {
-                const data = JSON.parse(event.data);
-                const time = new Date().toLocaleTimeString();
+            // Collect Agents
+            const agents = [];
+            const rows = document.querySelectorAll('[id^="agent-row-"]');
 
-                let colorClass = "text-green-400";
-                if(data.type === 'error' || data.status === 'error') colorClass = "text-red-400";
-                if(data.type === 'lock' || data.type === 'unlock') colorClass = "text-blue-400";
-                if(data.type === 'write') colorClass = "text-yellow-400";
+            if(rows.length === 0) {
+                alert("Musisz dodać co najmniej jednego agenta.");
+                return;
+            }
 
-                const logEntry = document.createElement('div');
-                logEntry.className = `mb-1 ${colorClass}`;
-                logEntry.innerHTML = `<span class="text-gray-500">[${time}]</span> ${data.message}`;
+            for (let row of rows) {
+                const isLeader = row.querySelector('input[type="radio"]').checked;
+                const agentId = row.querySelector('.agent-id').value.trim();
+                const model = row.querySelector('.agent-model').value.trim();
+                const apiKey = row.querySelector('.agent-api-key').value.trim();
+                const roleDesc = row.querySelector('.agent-role').value.trim();
 
-                consoleOutput.appendChild(logEntry);
-                consoleOutput.scrollTop = consoleOutput.scrollHeight;
-            };
+                if(!agentId || !model || !apiKey || !roleDesc) {
+                    alert("Wypełnij wszystkie pola dla każdego agenta!");
+                    return;
+                }
 
-            ws.onclose = function(e) {
-                const logEntry = document.createElement('div');
-                logEntry.className = "text-gray-500 italic mt-2";
-                logEntry.textContent = "Rozłączono z serwerem. Odśwież stronę.";
-                consoleOutput.appendChild(logEntry);
-            };
+                agents.push({
+                    agent_id: agentId,
+                    role_description: roleDesc,
+                    api_key: apiKey,
+                    model: model,
+                    is_leader: isLeader
+                });
+            }
+
+            try {
+                // 1. Stworzenie Repozytorium
+                const repoRes = await fetch('/repo/create', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(bodyData)
+                });
+
+                if(!repoRes.ok) throw new Error("Błąd podczas tworzenia repo");
+                const repoData = await repoRes.json();
+                const repoId = repoData.repo_id;
+
+                // 2. Wgranie agentów
+                const agentRes = await fetch(`/repo/${repoId}/agents`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ agents: agents })
+                });
+
+                if(!agentRes.ok) throw new Error("Błąd konfiguracji agentów");
+
+                // Przekierowanie do Studio
+                window.location.href = `/static/studio.html?repo_id=${repoId}`;
+
+            } catch(e) {
+                alert(e.message);
+            }
         }
     </script>
 </body>
