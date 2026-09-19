@@ -144,19 +144,44 @@
                 const data = await res.json();
                 const list = document.getElementById('file-list');
 
+                list.innerHTML = ''; // Clear previous elements securely
+
                 if (data.files.length === 0) {
-                    list.innerHTML = '<li class="italic text-gray-400">Repozytorium jest puste.</li>';
+                    const emptyLi = document.createElement('li');
+                    emptyLi.className = "italic text-gray-400";
+                    emptyLi.textContent = "Repozytorium jest puste.";
+                    list.appendChild(emptyLi);
                     return;
                 }
 
-                list.innerHTML = '';
                 data.files.forEach(file => {
                     const li = document.createElement('li');
                     li.className = "flex items-center space-x-2";
-                    li.innerHTML = `
-                        <svg class="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z"></path></svg>
-                        <a href="/repo/${repoId}/file/${file}" target="_blank" class="hover:text-blue-600 hover:underline">${file}</a>
-                    `;
+
+                    const svgNS = "http://www.w3.org/2000/svg";
+                    const svg = document.createElementNS(svgNS, "svg");
+                    svg.setAttribute("class", "w-4 h-4 text-gray-400");
+                    svg.setAttribute("fill", "none");
+                    svg.setAttribute("stroke", "currentColor");
+                    svg.setAttribute("viewBox", "0 0 24 24");
+
+                    const path = document.createElementNS(svgNS, "path");
+                    path.setAttribute("stroke-linecap", "round");
+                    path.setAttribute("stroke-linejoin", "round");
+                    path.setAttribute("stroke-width", "2");
+                    path.setAttribute("d", "M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z");
+
+                    svg.appendChild(path);
+
+                    const link = document.createElement('a');
+                    link.href = `/repo/${repoId}/file/${encodeURIComponent(file)}`;
+                    link.target = "_blank";
+                    link.className = "hover:text-blue-600 hover:underline";
+                    link.textContent = file;
+
+                    li.appendChild(svg);
+                    li.appendChild(link);
+
                     list.appendChild(li);
                 });
             } catch(e) {
