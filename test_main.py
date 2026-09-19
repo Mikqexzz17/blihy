@@ -85,3 +85,78 @@ def test_get_nonexistent_file():
     # Próba odczytu nieistniejącego pliku
     read_response = client.get(f"/repo/{repo_id}/file/nonexistent.txt")
     assert read_response.status_code == 404
+
+def test_run_command():
+    # Utworzenie repo i pliku
+    response = client.post("/repo/create")
+    repo_id = response.json()["repo_id"]
+
+    file_content = "print('hello from sandbox')"
+    client.post(
+        f"/repo/{repo_id}/file/script.py",
+        json={"content": file_content}
+    )
+
+    # Uruchomienie komendy
+    run_response = client.post(
+        f"/repo/{repo_id}/run",
+        json={"command": "python script.py"}
+    )
+
+    assert run_response.status_code == 200
+    data = run_response.json()
+    assert data["returncode"] == 0
+    assert "hello from sandbox" in data["stdout"]
+
+def test_file_locking():
+    # Utworzenie repo i pliku
+    response = client.post("/repo/create")
+    repo_id = response.json()["repo_id"]
+
+    client.post(
+        f"/repo/{repo_id}/file/important.txt",
+        json={"content": "initial content"}
+    )
+
+    # Blokowanie pliku przez Agenta A
+    lock_response = client.post(
+        f"/repo/{repo_id}/file/important.txt/lock",
+        json={"agent_id": "Agent-A"}
+    )
+    assert lock_response.status_code == 200
+
+    # Próba zapisu przy istniejącej blokadzie przez innego Agenta
+    write_response = client.post(
+        f"/repo/{repo_id}/file/important.txt",
+        json={"content": "Agent B wants to overwrite", "agent_id": "Agent-B"}
+    )
+    assert write_response.status_code == 409
+    assert "locked by agent Agent-A" in write_response.json()["detail"]
+
+    # Próba zapisu przy istniejącej blokadzie przez wlaściciela blokady (Agenta A)
+    write_response_owner = client.post(
+        f"/repo/{repo_id}/file/important.txt",
+        json={"content": "Agent A edits their own file", "agent_id": "Agent-A"}
+    )
+    assert write_response_owner.status_code == 200
+
+    # Próba odblokowania przez innego agenta
+    wrong_unlock = client.post(
+        f"/repo/{repo_id}/file/important.txt/unlock",
+        json={"agent_id": "Agent-B"}
+    )
+    assert wrong_unlock.status_code == 403
+
+    # Poprawne odblokowanie przez Agenta A
+    unlock_response = client.post(
+        f"/repo/{repo_id}/file/important.txt/unlock",
+        json={"agent_id": "Agent-A"}
+    )
+    assert unlock_response.status_code == 200
+
+    # Teraz zapis powinien się udać komukolwiek
+    write_success = client.post(
+        f"/repo/{repo_id}/file/important.txt",
+        json={"content": "Finally overwritten by someone else"}
+    )
+    assert write_success.status_code == 200
